@@ -1,22 +1,13 @@
 agents:
   Agentbuilder1:
     description: "Transform agents to description/default_prompt."
-    default_prompt: " 
-       Please transform agents descriptions to the sample form: 
-       AgentNameOne:
-       description: "A description..."
-       default_prompt: "A default prompt..."
-       AgentNameTwo:
-       description: "Another description..."
-       default_prompt: "Another prompt..." "
+    default_prompt: " Please transform agents descriptions to the sample form: "
   Agentbuilder2:
-     description: "Transform agents to description/default_prompt."
-     default_prompt: " - id: tfda_01_application_completeness
-              name: Administrative Completeness Check
-              category: regulatory_compliance
-              description: Verifies if the submission dossier contains all required administrative documents according to TFDA regulations.
-              system_prompt: |
-              You are an expert TFDA medical device reviewer. Your task is to analyze the provided list of submitted documents."
+    description: "Transform agents to description/default_prompt/"
+    default_prompt: " Please transform agents descriptions to the sample form: "
+  QMS_summarizer2:
+    description: "QMS summarizer"
+    default_prompt: "請將所提供觀察資料，依據[1]、[2]等內容放置報告資料對應位置，並以繁體中文產生markdown文件, 放置之資料以coral color標示(user will provide 觀察資料 and 報告資料) "
   AdministrativeCompletenessCheck:
     description: "Verifies if the submission dossier contains all required administrative documents according to TFDA regulations."
     default_prompt: "You are an expert TFDA medical device reviewer. Your task is to analyze the provided list of submitted documents.\nBased on the document list, please perform the following in TRADITIONAL CHINESE:\n1.  Create a Markdown checklist comparing the submitted documents against the TFDA's standard administrative requirements for a new medical device application.\n2.  Clearly indicate if each required document is present, absent, or requires further verification.\n3.  Summarize any administrative deficiencies found in the application.\n4.  Conclude with a set of follow-up questions for the applicant to address the identified issues.\n\nYour entire response MUST be in Traditional Chinese."
