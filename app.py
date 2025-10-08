@@ -4,6 +4,8 @@ import google.generativeai as genai
 from PyPDF2 import PdfReader
 import yaml
 from pathlib import Path
+from datetime import datetime
+import google.api_core.exceptions
 
 # -------------------- CONFIG --------------------
 st.set_page_config(page_title="Ferrari FDA Agent", page_icon="🏎️", layout="wide")
@@ -26,6 +28,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------- AGENT CONFIG LOADER --------------------
+@st.cache_data # Cache the config loading
 def load_agents_config():
     """Load agents configuration from agents.yaml"""
     try:
@@ -34,33 +37,12 @@ def load_agents_config():
             with open(config_path, 'r') as f:
                 return yaml.safe_load(f)
         else:
-            # Return default configuration if file doesn't exist
             return {
                 'agents': {
-                    'Evidence Extractor': {
-                        'description': 'Extracts key evidence from FDA submissions',
-                        'default_prompt': 'Extract all clinical evidence, safety data, and comparative information from the submission.',
-                        'temperature': 0.3,
-                        'max_tokens': 4096
-                    },
-                    'Compliance Checker': {
-                        'description': 'Checks FDA regulatory compliance',
-                        'default_prompt': 'Review the submission for FDA 510(k) compliance requirements and identify any gaps.',
-                        'temperature': 0.2,
-                        'max_tokens': 4096
-                    },
-                    'Comparator Analyzer': {
-                        'description': 'Compares device with predicate devices',
-                        'default_prompt': 'Compare the subject device with predicate devices, identifying similarities and differences.',
-                        'temperature': 0.4,
-                        'max_tokens': 4096
-                    },
-                    'Risk Assessor': {
-                        'description': 'Assesses risks and safety concerns',
-                        'default_prompt': 'Identify and assess potential risks, safety concerns, and mitigation strategies.',
-                        'temperature': 0.3,
-                        'max_tokens': 4096
-                    }
+                    'Evidence Extractor': {'description': 'Extracts key evidence from FDA submissions', 'default_prompt': 'Extract all clinical evidence, safety data, and comparative information.', 'temperature': 0.3, 'max_tokens': 4096},
+                    'Compliance Checker': {'description': 'Checks FDA regulatory compliance', 'default_prompt': 'Review the submission for FDA 510(k) compliance requirements and identify any gaps.', 'temperature': 0.2, 'max_tokens': 4096},
+                    'Comparator Analyzer': {'description': 'Compares device with predicate devices', 'default_prompt': 'Compare the subject device with predicate devices, identifying similarities and differences.', 'temperature': 0.4, 'max_tokens': 4096},
+                    'Risk Assessor': {'description': 'Assesses risks and safety concerns', 'default_prompt': 'Identify and assess potential risks, safety concerns, and mitigation strategies.', 'temperature': 0.3, 'max_tokens': 4096}
                 }
             }
     except Exception as e:
@@ -68,203 +50,149 @@ def load_agents_config():
         return {'agents': {}}
 
 # -------------------- GEMINI CONFIG --------------------
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    GEMINI_API_KEY = st.text_input("🔑 Enter your Gemini API Key:", type="password")
+# FIX 1: Use session_state to store the API key for the current session
+if 'GEMINI_API_KEY' not in st.session_state:
+    st.session_state['GEMINI_API_KEY'] = os.getenv("GEMINI_API_KEY")
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+if not st.session_state['GEMINI_API_KEY']:
+    api_key_input = st.text_input("🔑 Enter your Gemini API Key:", type="password", key="api_key_input")
+    if api_key_input:
+        st.session_state['GEMINI_API_KEY'] = api_key_input
+
+if st.session_state.get('GEMINI_API_KEY'):
+    try:
+        genai.configure(api_key=st.session_state['GEMINI_API_KEY'])
+    except Exception as e:
+        st.error(f"Failed to configure Gemini API: {e}")
 else:
     st.warning("Please enter your Gemini API Key to continue.")
+
+# -------------------- UTILITY FUNCTIONS --------------------
+# FIX 2: Cache the text extraction to avoid reprocessing on every rerun
+@st.cache_data
+def extract_text_from_files(uploaded_files):
+    """Extracts text from a list of uploaded files."""
+    extracted_text = ""
+    for uploaded_file in uploaded_files:
+        st.write(f"**Processing:** {uploaded_file.name}")
+        if uploaded_file.type == "application/pdf":
+            try:
+                reader = PdfReader(uploaded_file)
+                for i, page in enumerate(reader.pages):
+                    extracted_text += f"\n--- Page {i + 1} of {uploaded_file.name} ---\n"
+                    extracted_text += page.extract_text() or ""
+            except Exception as e:
+                st.error(f"Error reading {uploaded_file.name}: {e}")
+        else:
+            try:
+                content = uploaded_file.read().decode("utf-8")
+                extracted_text += f"\n--- {uploaded_file.name} ---\n{content}\n"
+            except Exception as e:
+                st.error(f"Error reading {uploaded_file.name}: {e}")
+    return extracted_text
 
 # -------------------- MAIN UI --------------------
 st.title("🏎️ Ferrari FDA Evidence Extractor + Comparator")
 
-# Load agent configurations
 agents_config = load_agents_config()
 agents = agents_config.get('agents', {})
 
-# -------------------- INPUT METHOD SELECTION --------------------
 st.subheader("📥 Input Method")
-input_method = st.radio("Choose input method:", 
-                        ["Upload Files", "Paste Text/Markdown"],
-                        horizontal=True)
+input_method = st.radio("Choose input method:", ["Upload Files", "Paste Text/Markdown"], horizontal=True)
 
 summary_text = ""
-selected_pages = None
 
 if input_method == "Upload Files":
-    # -------------------- FILE UPLOAD --------------------
     uploaded_files = st.file_uploader(
-        "📂 Upload 510(k) submission materials (PDF/TXT/MD)", 
-        type=["pdf", "txt", "md", "markdown"], 
+        "📂 Upload 510(k) submission materials (PDF/TXT/MD)",
+        type=["pdf", "txt", "md", "markdown"],
         accept_multiple_files=True
     )
-    
     if uploaded_files:
-        for uploaded_file in uploaded_files:
-            st.write(f"**Processing:** {uploaded_file.name}")
-            
-            if uploaded_file.type == "application/pdf":
-                reader = PdfReader(uploaded_file)
-                total_pages = len(reader.pages)
-                
-                # PDF Page Selection
-                st.write(f"📄 PDF has {total_pages} pages")
-                use_page_selection = st.checkbox(f"Select specific pages for {uploaded_file.name}?", key=f"select_{uploaded_file.name}")
-                
-                if use_page_selection:
-                    page_range = st.text_input(
-                        f"Enter pages (e.g., '1,3,5-10' or 'all'):", 
-                        value="all",
-                        key=f"pages_{uploaded_file.name}"
-                    )
-                    
-                    # Parse page selection
-                    if page_range.lower() == "all":
-                        selected_pages = list(range(total_pages))
-                    else:
-                        selected_pages = []
-                        for part in page_range.split(','):
-                            part = part.strip()
-                            if '-' in part:
-                                start, end = map(int, part.split('-'))
-                                selected_pages.extend(range(start-1, min(end, total_pages)))
-                            else:
-                                page_num = int(part) - 1
-                                if 0 <= page_num < total_pages:
-                                    selected_pages.append(page_num)
-                else:
-                    selected_pages = list(range(total_pages))
-                
-                # Extract text from selected pages
-                for page_num in selected_pages:
-                    summary_text += f"\n--- Page {page_num + 1} ---\n"
-                    summary_text += reader.pages[page_num].extract_text() + "\n"
-                
-                st.success(f"✅ Extracted {len(selected_pages)} pages from {uploaded_file.name}")
-            
-            else:  # TXT or Markdown
-                content = uploaded_file.read().decode("utf-8")
-                summary_text += f"\n--- {uploaded_file.name} ---\n{content}\n"
-                st.success(f"✅ Loaded {uploaded_file.name}")
+        summary_text = extract_text_from_files(uploaded_files)
+        st.success("✅ All files processed successfully.")
 
-else:  # Paste Text/Markdown
-    st.subheader("📝 Paste Your Content")
+else:
     pasted_text = st.text_area(
-        "Paste your text, markdown, or document content here:",
+        "📝 Paste your text, markdown, or document content here:",
         height=300,
         placeholder="Paste your 510(k) submission content, clinical data, or any relevant text here..."
     )
-    
     if pasted_text:
         summary_text = pasted_text
         st.success(f"✅ Text loaded ({len(pasted_text)} characters)")
 
 # -------------------- AGENT SELECTION & CONFIG --------------------
-if summary_text:
+if summary_text and st.session_state.get('GEMINI_API_KEY'):
     st.subheader("🤖 Agent Configuration")
-    
     col1, col2 = st.columns([1, 2])
     
     with col1:
-        if agents:
-            agent_names = list(agents.keys())
-            selected_agent = st.selectbox("Select Agent:", agent_names)
-            
-            agent_config = agents[selected_agent]
-            st.info(f"**Description:** {agent_config.get('description', 'No description')}")
-        else:
-            st.warning("No agents found. Using default configuration.")
-            selected_agent = "Default Agent"
-            agent_config = {
-                'default_prompt': 'Analyze the submission and extract key information.',
-                'temperature': 0.3,
-                'max_tokens': 4096
-            }
+        agent_names = list(agents.keys()) if agents else ["Default Agent"]
+        selected_agent = st.selectbox("Select Agent:", agent_names)
+        
+        agent_config = agents.get(selected_agent, {
+            'description': 'Default agent for general analysis.',
+            'default_prompt': 'Analyze the submission and extract key information.',
+            'temperature': 0.3,
+            'max_tokens': 4096
+        })
+        st.info(f"**Description:** {agent_config.get('description', 'No description')}")
     
     with col2:
-        # Display and allow modification of agent parameters
         st.write("**Agent Parameters:**")
-        
         temperature = st.slider(
-            "Temperature (creativity):",
-            min_value=0.0,
-            max_value=1.0,
-            value=float(agent_config.get('temperature', 0.3)),
-            step=0.1
+            "Temperature (creativity):", 0.0, 1.0, float(agent_config.get('temperature', 0.3)), 0.1
         )
-        
         max_tokens = st.number_input(
-            "Max Tokens:",
-            min_value=512,
-            max_value=8192,
-            value=int(agent_config.get('max_tokens', 4096)),
-            step=512
+            "Max Tokens:", 512, 8192, int(agent_config.get('max_tokens', 4096)), 512
         )
-    
-    # -------------------- PROMPT MODIFICATION --------------------
+
     st.subheader("✍️ Prompt Configuration")
-    
     default_prompt = agent_config.get('default_prompt', '')
     user_prompt = st.text_area(
-        "Modify the agent prompt:",
-        value=default_prompt,
-        height=150,
-        placeholder="Enter your custom prompt or use the default..."
+        "Modify the agent prompt:", value=default_prompt, height=150
     )
     
-    # -------------------- EXECUTION --------------------
     if st.button("🚀 Run Agent") and user_prompt:
+        # FIX 3: Set the timestamp when the agent is run
+        st.session_state['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
         with st.spinner(f"🏁 {selected_agent} processing... Ferrari engines at full throttle!"):
             try:
-                # Configure model with selected parameters
                 generation_config = genai.GenerationConfig(
                     temperature=temperature,
                     max_output_tokens=max_tokens
                 )
                 
+                # Using a valid and current model name
                 model = genai.GenerativeModel(
-                    "gemini-1.5-flash",
+                    "gemini-1.5-flash", 
                     generation_config=generation_config
                 )
                 
-                # Build full prompt
-                full_prompt = f"""Agent: {selected_agent}
-
-Submission Content:
-{summary_text}
-
-Task:
-{user_prompt}
-
-Please provide a detailed analysis."""
+                full_prompt = f"Agent: {selected_agent}\n\nSubmission Content:\n{summary_text}\n\nTask:\n{user_prompt}\n\nPlease provide a detailed analysis."
                 
-                # Generate response
                 response = model.generate_content(full_prompt)
                 
-                # Process and highlight results
                 result = response.text
-                result = result.replace("[YES]", "<span class='highlight-positive'>✔ YES</span>")
-                result = result.replace("[NO]", "<span class='highlight-negative'>✘ NO</span>")
-                result = result.replace("PASS", "<span class='highlight-positive'>✔ PASS</span>")
-                result = result.replace("FAIL", "<span class='highlight-negative'>✘ FAIL</span>")
+                result_html = result.replace("[YES]", "<span class='highlight-positive'>✔ YES</span>")
+                result_html = result_html.replace("[NO]", "<span class='highlight-negative'>✘ NO</span>")
+                result_html = result_html.replace("PASS", "<span class='highlight-positive'>✔ PASS</span>")
+                result_html = result_html.replace("FAIL", "<span class='highlight-negative'>✘ FAIL</span>")
                 
-                # Display results
                 st.subheader("📊 Analysis Results")
-                st.markdown(f"<div class='ai-msg chat-bubble'>{result}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='ai-msg chat-bubble'>{result_html}</div>", unsafe_allow_html=True)
                 
                 # Export options
-                col1, col2 = st.columns(2)
-                with col1:
+                col1_export, col2_export = st.columns(2)
+                with col1_export:
                     st.download_button(
-                        "📥 Download Report (Markdown)",
-                        result,
+                        "📥 Download Report (Markdown)", result,
                         file_name=f"FDA_Agent_Report_{selected_agent.replace(' ', '_')}.md",
                         mime="text/markdown"
                     )
-                with col2:
-                    # Create a formatted report
+                with col2_export:
                     formatted_report = f"""# FDA Agent Analysis Report
 ## Agent: {selected_agent}
 ## Date: {st.session_state.get('timestamp', 'N/A')}
@@ -280,20 +208,21 @@ Please provide a detailed analysis."""
 {response.text}
 """
                     st.download_button(
-                        "📥 Download Full Report",
-                        formatted_report,
+                        "📥 Download Full Report", formatted_report,
                         file_name=f"FDA_Full_Report_{selected_agent.replace(' ', '_')}.md",
                         mime="text/markdown"
                     )
-                
+
+            # FIX 6: More specific error handling for API calls
+            except google.api_core.exceptions.GoogleAPICallError as e:
+                st.error(f"❌ API Error: {e.message}")
             except Exception as e:
-                st.error(f"❌ Error during processing: {str(e)}")
+                st.error(f"❌ An unexpected error occurred: {str(e)}")
 
 # -------------------- FOOTER --------------------
 st.markdown("""---
 ### 🏎️ Powered by Ferrari-Style AI Agents
 Built with **Streamlit + Gemini API** | Multi-Agent System with YAML Configuration
-**Features:** PDF Page Selection • Text Pasting • Agent Configuration • Parameter Tuning
 """)
 
 # -------------------- SAMPLE AGENTS.YAML --------------------
@@ -310,17 +239,5 @@ agents:
     description: Checks FDA regulatory compliance
     default_prompt: Review the submission for FDA 510(k) compliance requirements and identify any gaps.
     temperature: 0.2
-    max_tokens: 4096
-  
-  Comparator Analyzer:
-    description: Compares device with predicate devices
-    default_prompt: Compare the subject device with predicate devices, identifying similarities and differences.
-    temperature: 0.4
-    max_tokens: 4096
-  
-  Risk Assessor:
-    description: Assesses risks and safety concerns
-    default_prompt: Identify and assess potential risks, safety concerns, and mitigation strategies.
-    temperature: 0.3
     max_tokens: 4096
 """, language="yaml")
